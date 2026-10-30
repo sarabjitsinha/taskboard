@@ -27,6 +27,15 @@ export type ApiProjectMember = {
   user: ApiUser;
 };
 
+export type ApiActivity = {
+  id: string;
+  action: string;
+  details: string;
+  user: ApiUser | null;
+  createdAt: string;
+  created_at?: string;
+};
+
 export type ApiProjectDetail = {
   id: string;
   name: string;
@@ -35,6 +44,7 @@ export type ApiProjectDetail = {
   owner: ApiUser;
   memberships: ApiProjectMember[];
   tasks: ApiTask[];
+  activities?: ApiActivity[];
   createdAt: string;
   updatedAt: string;
 };

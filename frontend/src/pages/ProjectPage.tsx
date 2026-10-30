@@ -5,7 +5,8 @@ import { apiFetch, getToken } from "@/lib/api-client";
 import { Header } from "@/components/Header";
 import { StatusColumn } from "@/components/StatusColumn";
 import { TaskDetail } from "@/components/TaskDetail";
-import type { ApiProjectDetail, ApiTask, TaskStatus } from "@/types";
+import { ActivityFeed } from "@/components/ActivityFeed";
+import type { ApiProjectDetail, ApiTask, ApiActivity, TaskStatus } from "@/types";
 import { STATUS_ORDER } from "@/types";
 
 export default function ProjectPage() {
@@ -27,6 +28,12 @@ export default function ProjectPage() {
     queryFn: () => apiFetch<{ project: ApiProjectDetail }>(`/api/projects/${id}`),
   });
 
+  const { data: activityData, isLoading: isActivityLoading } = useQuery({
+    queryKey: ["activities", id],
+    queryFn: () => apiFetch<{ activities: ApiActivity[] }>(`/api/projects/${id}/activities`),
+    enabled: !!id,
+  });
+
   const createTask = useMutation({
     mutationFn: (input: { title: string; status: TaskStatus }) =>
       apiFetch<{ task: ApiTask }>(`/api/projects/${id}/tasks`, {
@@ -36,6 +43,7 @@ export default function ProjectPage() {
     onSuccess: () => {
       setNewTitle("");
       queryClient.invalidateQueries({ queryKey: ["project", id] });
+      queryClient.invalidateQueries({ queryKey: ["activities", id] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "create failed"),
   });
@@ -143,22 +151,33 @@ export default function ProjectPage() {
               ))}
             </div>
 
-            <section className="mt-10">
-              <h2 className="text-sm font-medium mb-3">members</h2>
-              <ul className="bg-surface border border-border rounded-lg divide-y divide-border">
-                {project.memberships.map((m) => (
-                  <li
-                    key={m.id}
-                    className="px-4 py-3 flex items-center justify-between text-sm"
-                  >
-                    <span>{m.user.name}</span>
-                    <span className="text-xs text-muted">
-                      {m.user.email} · {m.role}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </section>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-10">
+              <div className="lg:col-span-2">
+                <ActivityFeed
+                  activities={activityData?.activities || project.activities || []}
+                  isLoading={isActivityLoading}
+                />
+              </div>
+
+              <div>
+                <section>
+                  <h2 className="text-sm font-medium mb-3">members</h2>
+                  <ul className="bg-surface border border-border rounded-lg divide-y divide-border">
+                    {project.memberships.map((m) => (
+                      <li
+                        key={m.id}
+                        className="px-4 py-3 flex items-center justify-between text-sm"
+                      >
+                        <span>{m.user.name}</span>
+                        <span className="text-xs text-muted">
+                          {m.user.email} · {m.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </div>
+            </div>
           </>
         )}
       </main>

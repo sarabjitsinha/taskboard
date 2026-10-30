@@ -135,3 +135,71 @@ class TestTasks:
         assert response_union.status_code == 200
         assert len(response_union.data['tasks']) == 0
 
+@pytest.mark.django_db
+class TestActivityFeed:
+    def test_task_creation_records_activity(self, auth_client, user):
+        project = Project.objects.create(name='Feed Test', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+
+        res = auth_client.post(f'/api/projects/{project.id}/tasks', {'title': 'Audit Log Task'}, format='json')
+        assert res.status_code == 201
+
+        feed_res = auth_client.get(f'/api/projects/{project.id}/activities')
+        assert feed_res.status_code == 200
+        activities = feed_res.data['activities']
+        assert len(activities) >= 1
+        assert activities[0]['action'] == 'task_created'
+        assert "Audit Log Task" in activities[0]['details']
+        assert activities[0]['user']['email'] == user.email
+
+    def test_task_status_and_assignee_changes_record_activity(self, auth_client, user):
+        project = Project.objects.create(name='Feed Test', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        task = Task.objects.create(project=project, title='Important Task', created_by=user, status='todo')
+
+        # Status change
+        patch_res = auth_client.patch(f'/api/tasks/{task.id}', {'status': 'in_progress'}, format='json')
+        assert patch_res.status_code == 200
+
+        # Assignee change
+        assignee = User.objects.create_user(email='collab@example.com', name='Collab User', password='password123')
+        Membership.objects.create(user=assignee, project=project, role='member')
+        patch_res2 = auth_client.patch(f'/api/tasks/{task.id}', {'assigneeId': str(assignee.id)}, format='json')
+        assert patch_res2.status_code == 200
+
+        feed_res = auth_client.get(f'/api/projects/{project.id}/activities')
+        assert feed_res.status_code == 200
+        actions = [a['action'] for a in feed_res.data['activities']]
+        assert 'status_changed' in actions
+        assert 'assignee_changed' in actions
+        # Most recent first
+        assert actions[0] == 'assignee_changed'
+
+    def test_activity_feed_scoped_to_project(self, auth_client, user):
+        p1 = Project.objects.create(name='P1', owner=user)
+        Membership.objects.create(user=user, project=p1, role='admin')
+        auth_client.post(f'/api/projects/{p1.id}/tasks', {'title': 'P1 Task'}, format='json')
+
+        other = User.objects.create_user(email='other2@example.com', name='Other 2', password='password123')
+        p2 = Project.objects.create(name='P2', owner=other)
+        Membership.objects.create(user=other, project=p2, role='admin')
+        from projects.models import Activity
+        Activity.objects.create(project=p2, user=other, action='task_created', details='Secret P2 Activity')
+
+        feed_res = auth_client.get(f'/api/projects/{p1.id}/activities')
+        assert feed_res.status_code == 200
+        details = [a['details'] for a in feed_res.data['activities']]
+        assert any('P1 Task' in d for d in details)
+        assert not any('Secret P2 Activity' in d for d in details)
+
+    def test_non_member_cannot_read_activity_feed(self, client, user):
+        owner = User.objects.create_user(email='owner3@example.com', name='Owner 3', password='password123')
+        project = Project.objects.create(name='Private', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        response = client.get(f'/api/projects/{project.id}/activities')
+        assert response.status_code == 403
+

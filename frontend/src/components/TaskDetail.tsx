@@ -16,7 +16,9 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description ?? "");
   const [status, setStatus] = useState<TaskStatus>(task.status);
-  const [assigneeId, setAssigneeId] = useState<string>(task.assigneeId ?? "");
+  const [assigneeId, setAssigneeId] = useState<string>(
+    task.assigneeId ?? (task as any).assignee_id ?? ""
+  );
   const [error, setError] = useState<string | null>(null);
 
   const updateTask = useMutation({
@@ -27,6 +29,7 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["activities", projectId] });
       onClose();
     },
     onError: (err) => setError(err instanceof Error ? err.message : "save failed"),
@@ -37,6 +40,7 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
       apiFetch<{ ok: true }>(`/api/tasks/${task.id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["activities", projectId] });
       onClose();
     },
     onError: (err) => setError(err instanceof Error ? err.message : "delete failed"),
