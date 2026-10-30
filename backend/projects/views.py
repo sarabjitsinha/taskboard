@@ -367,6 +367,9 @@ class MemberAddView(APIView):
         return Response({'ok': True, 'role': membership_obj.role}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+from .airtable_service import export_tasks_to_airtable
+
+
 class ExportView(APIView):
     def post(self, request, project_id):
         membership = _get_membership(request.user, project_id)
@@ -376,4 +379,22 @@ class ExportView(APIView):
             return Response({'error': 'only admins and members can export'}, status=status.HTTP_403_FORBIDDEN)
 
         tasks = Task.objects.filter(project_id=project_id).select_related('assignee', 'created_by')
-        return Response({'exported': 0, 'tasks': TaskSerializer(tasks, many=True).data})
+        try:
+            result = export_tasks_to_airtable(tasks)
+            project = Project.objects.get(id=project_id)
+            record_activity(
+                project=project,
+                user=request.user,
+                action='tasks_exported',
+                details=f"exported {result['exported']} tasks to Airtable",
+            )
+            return Response({
+                'exported': result['exported'],
+                'created': result['created'],
+                'updated': result['updated'],
+                'failed': result['failed'],
+                'errors': result['errors'],
+                'tasks': TaskSerializer(tasks, many=True).data,
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

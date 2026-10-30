@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, getToken } from "@/lib/api-client";
+import { apiFetch, getStoredUser, getToken } from "@/lib/api-client";
 import { Header } from "@/components/Header";
 import { StatusColumn } from "@/components/StatusColumn";
 import { TaskDetail } from "@/components/TaskDetail";
 import { ActivityFeed } from "@/components/ActivityFeed";
-import type { ApiProjectDetail, ApiTask, ApiActivity, TaskStatus } from "@/types";
+import type { ApiProjectDetail, ApiTask, ApiActivity, ApiExportResult, TaskStatus } from "@/types";
 import { STATUS_ORDER } from "@/types";
 
 export default function ProjectPage() {
@@ -18,6 +18,11 @@ export default function ProjectPage() {
   const [newTitle, setNewTitle] = useState("");
   const [newColumn, setNewColumn] = useState<TaskStatus>("todo");
   const [error, setError] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<{
+    type: "success" | "error";
+    message: string;
+    details?: string[];
+  } | null>(null);
 
   useEffect(() => {
     if (!getToken()) navigate("/login", { replace: true });
@@ -48,7 +53,38 @@ export default function ProjectPage() {
     onError: (err) => setError(err instanceof Error ? err.message : "create failed"),
   });
 
+  const exportTasks = useMutation({
+    mutationFn: () =>
+      apiFetch<ApiExportResult>(`/api/projects/${id}/export`, {
+        method: "POST",
+      }),
+    onSuccess: (data) => {
+      setExportStatus({
+        type: data.failed > 0 ? "error" : "success",
+        message:
+          data.failed > 0
+            ? `Export completed with warnings: ${data.exported} exported (${data.created} created, ${data.updated} updated), ${data.failed} failed.`
+            : `Successfully exported ${data.exported} task${data.exported === 1 ? "" : "s"} to Airtable (${data.created} created, ${data.updated} updated).`,
+        details: data.errors && data.errors.length > 0 ? data.errors : undefined,
+      });
+      queryClient.invalidateQueries({ queryKey: ["activities", id] });
+      queryClient.invalidateQueries({ queryKey: ["project", id] });
+    },
+    onError: (err) => {
+      setExportStatus({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to export tasks to Airtable",
+      });
+    },
+  });
+
   const project = data?.project;
+  const currentUser = getStoredUser();
+  const currentMembership = project?.memberships.find(
+    (m) => m.user.id === currentUser?.id || m.user.email === currentUser?.email
+  );
+  const canExport = currentMembership?.role === "admin" || currentMembership?.role === "member";
+
   const tasksByStatus: Record<TaskStatus, ApiTask[]> = {
     todo: [],
     in_progress: [],
@@ -82,7 +118,7 @@ export default function ProjectPage() {
 
         {project && (
           <>
-            <div className="flex items-start justify-between mt-4 mb-8">
+            <div className="flex items-start justify-between mt-4 mb-6">
               <div>
                 <h1 className="text-2xl font-semibold">{project.name}</h1>
                 {project.description && (
@@ -94,7 +130,76 @@ export default function ProjectPage() {
                   owner: {project.owner.name} · {project.memberships.length} members
                 </p>
               </div>
+
+              <div className="flex items-center gap-3">
+                {canExport ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportStatus(null);
+                      exportTasks.mutate();
+                    }}
+                    disabled={exportTasks.isPending}
+                    aria-label="Export to Airtable"
+                    className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium rounded-md px-4 py-2 transition-colors shadow-sm"
+                  >
+                    {exportTasks.isPending ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                        </svg>
+                        <span>Exporting to Airtable…</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        </svg>
+                        <span>Export to Airtable</span>
+                      </>
+                    )}
+                  </button>
+                ) : currentMembership?.role === "viewer" ? (
+                  <span
+                    className="text-xs text-muted bg-surface border border-border px-3 py-1.5 rounded-md cursor-not-allowed"
+                    title="Viewers cannot export tasks"
+                  >
+                    Export disabled (viewer)
+                  </span>
+                ) : null}
+              </div>
             </div>
+
+            {exportStatus && (
+              <div
+                className={`mb-6 p-4 rounded-lg border text-sm flex items-start justify-between ${
+                  exportStatus.type === "success"
+                    ? "bg-emerald-950/40 border-emerald-500/30 text-emerald-200"
+                    : "bg-red-950/40 border-red-500/30 text-red-200"
+                }`}
+                role="alert"
+              >
+                <div>
+                  <p className="font-medium">{exportStatus.message}</p>
+                  {exportStatus.details && exportStatus.details.length > 0 && (
+                    <ul className="mt-2 list-disc list-inside text-xs space-y-1 text-red-300">
+                      {exportStatus.details.map((d, i) => (
+                        <li key={i}>{d}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExportStatus(null)}
+                  className="text-xs text-muted hover:text-white ml-4 font-mono"
+                  aria-label="Dismiss banner"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
 
             <section className="bg-surface border border-border rounded-lg p-4 mb-6">
               <h2 className="text-sm font-medium mb-3">add a task</h2>

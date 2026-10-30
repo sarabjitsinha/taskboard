@@ -203,3 +203,150 @@ class TestActivityFeed:
         response = client.get(f'/api/projects/{project.id}/activities')
         assert response.status_code == 403
 
+
+@pytest.mark.django_db
+class TestAirtableExport:
+    def test_export_permissions(self, auth_client, user):
+        from unittest.mock import patch
+        from users.models import User as UserModel
+
+        # User is admin
+        project = Project.objects.create(name='Export Test', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        Task.objects.create(project=project, title='Task 1', created_by=user)
+
+        with patch('projects.views.export_tasks_to_airtable') as mock_export:
+            mock_export.return_value = {'exported': 1, 'created': 1, 'updated': 0, 'failed': 0, 'errors': []}
+            res = auth_client.post(f'/api/projects/{project.id}/export')
+            assert res.status_code == 200
+            assert res.data['exported'] == 1
+            assert mock_export.called
+
+        # User as member can export
+        member_user = UserModel.objects.create_user(email='member_export@example.com', name='Member', password='password123')
+        Membership.objects.create(user=member_user, project=project, role='member')
+        auth_client.force_authenticate(user=member_user)
+
+        with patch('projects.views.export_tasks_to_airtable') as mock_export:
+            mock_export.return_value = {'exported': 1, 'created': 0, 'updated': 1, 'failed': 0, 'errors': []}
+            res = auth_client.post(f'/api/projects/{project.id}/export')
+            assert res.status_code == 200
+            assert res.data['updated'] == 1
+
+        # User as viewer CANNOT export (403 forbidden)
+        viewer_user = UserModel.objects.create_user(email='viewer_export@example.com', name='Viewer', password='password123')
+        Membership.objects.create(user=viewer_user, project=project, role='viewer')
+        auth_client.force_authenticate(user=viewer_user)
+
+        res_viewer = auth_client.post(f'/api/projects/{project.id}/export')
+        assert res_viewer.status_code == 403
+        assert 'only admins and members can export' in res_viewer.data['error']
+
+        # Non-member CANNOT export (403 forbidden)
+        stranger = UserModel.objects.create_user(email='stranger_export@example.com', name='Stranger', password='password123')
+        auth_client.force_authenticate(user=stranger)
+
+        res_stranger = auth_client.post(f'/api/projects/{project.id}/export')
+        assert res_stranger.status_code == 403
+        assert res_stranger.data['error'] == 'forbidden'
+
+    def test_export_records_activity(self, auth_client, user):
+        from unittest.mock import patch
+        project = Project.objects.create(name='Export Feed Test', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        Task.objects.create(project=project, title='Task for Activity', created_by=user)
+
+        with patch('projects.views.export_tasks_to_airtable') as mock_export:
+            mock_export.return_value = {'exported': 1, 'created': 1, 'updated': 0, 'failed': 0, 'errors': []}
+            res = auth_client.post(f'/api/projects/{project.id}/export')
+            assert res.status_code == 200
+
+        feed_res = auth_client.get(f'/api/projects/{project.id}/activities')
+        assert feed_res.status_code == 200
+        actions = [a['action'] for a in feed_res.data['activities']]
+        assert 'tasks_exported' in actions
+        assert 'exported 1 tasks to Airtable' in feed_res.data['activities'][0]['details']
+
+
+@pytest.mark.django_db
+class TestAirtableService:
+    def test_export_tasks_to_mock_table_and_idempotency(self, user):
+        from projects.airtable_mock import MockAirtableTable
+        from projects.airtable_service import export_tasks_to_airtable
+
+        project = Project.objects.create(name='Service Test', owner=user)
+        t1 = Task.objects.create(project=project, title='Task 1', description='Desc 1', status='todo', created_by=user)
+        t2 = Task.objects.create(project=project, title='Task 2', description='Desc 2', status='done', created_by=user)
+
+        mock_table = MockAirtableTable()
+
+        # Run 1: Should create 2 records
+        res1 = export_tasks_to_airtable([t1, t2], custom_table=mock_table)
+        assert res1['exported'] == 2
+        assert res1['created'] == 2
+        assert res1['updated'] == 0
+        assert res1['failed'] == 0
+        assert len(mock_table.records) == 2
+
+        # Run 2: Re-run should update records, not duplicate them (idempotency)
+        t1.status = 'in_progress'
+        t1.save()
+        res2 = export_tasks_to_airtable([t1, t2], custom_table=mock_table)
+        assert res2['exported'] == 2
+        assert res2['created'] == 0
+        assert res2['updated'] == 2
+        assert res2['failed'] == 0
+        assert len(mock_table.records) == 2
+        assert mock_table.records[str(t1.id)]['Status'] == 'In progress'
+
+    def test_retry_transient_failures(self, user):
+        from projects.airtable_mock import MockAirtableTable
+        from projects.airtable_service import export_tasks_to_airtable
+
+        project = Project.objects.create(name='Retry Test', owner=user)
+        t = Task.objects.create(project=project, title='Task Retry', created_by=user)
+
+        # Fails once with 500 error, succeeds on attempt 2
+        mock_table = MockAirtableTable(fail_times=1, error_status=500)
+        res = export_tasks_to_airtable([t], custom_table=mock_table, sleep_fn=lambda _: None)
+
+        assert res['exported'] == 1
+        assert res['created'] == 1
+        assert mock_table.attempts == 2
+
+    def test_no_retry_on_permanent_failures(self, user):
+        from projects.airtable_mock import MockAirtableTable
+        from projects.airtable_service import export_tasks_to_airtable
+
+        project = Project.objects.create(name='Permanent Fail Test', owner=user)
+        t = Task.objects.create(project=project, title='Permanent Fail Task', created_by=user)
+
+        # Permanent 400 error: batch fails without retry, then fallback single upsert also fails without retry
+        mock_table = MockAirtableTable(should_fail=True, error_status=400)
+        res = export_tasks_to_airtable([t], custom_table=mock_table, sleep_fn=lambda _: None)
+
+        assert res['exported'] == 0
+        assert res['failed'] == 1
+        # Batch attempted 1 time (no retry), single attempted 1 time (no retry) = 2 attempts total
+        assert mock_table.attempts == 2
+
+    def test_single_record_failure_does_not_fail_entire_export(self, user):
+        from projects.airtable_mock import MockAirtableTable
+        from projects.airtable_service import export_tasks_to_airtable
+
+        project = Project.objects.create(name='Partial Fail Test', owner=user)
+        t1 = Task.objects.create(project=project, title='Good Task 1', created_by=user)
+        t2 = Task.objects.create(project=project, title='Invalid Task', created_by=user)
+        t3 = Task.objects.create(project=project, title='Good Task 2', created_by=user)
+
+        # 'Invalid Task' causes 422 error, but others succeed
+        mock_table = MockAirtableTable(fail_for_titles=['Invalid Task'])
+        res = export_tasks_to_airtable([t1, t2, t3], custom_table=mock_table, sleep_fn=lambda _: None)
+
+        assert res['exported'] == 2
+        assert res['created'] == 2
+        assert res['failed'] == 1
+        assert len(res['errors']) == 1
+        assert 'Invalid Task' in res['errors'][0]
+
+
