@@ -97,3 +97,41 @@ class TestTasks:
 
         response = client.delete(f'/api/tasks/{task.id}')
         assert response.status_code == 403
+    def test_search_tasks_by_query(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        Task.objects.create(project=project, title='Write report', description='Quarterly metrics', created_by=user)
+        Task.objects.create(project=project, title='Deploy release', description='Production release', created_by=user)
+
+        response = auth_client.get(f'/api/projects/{project.id}/tasks?q=report')
+        assert response.status_code == 200
+        titles = [t['title'] for t in response.data['tasks']]
+        assert titles == ['Write report']
+
+        response_desc = auth_client.get(f'/api/projects/{project.id}/tasks?q=production')
+        assert response_desc.status_code == 200
+        titles_desc = [t['title'] for t in response_desc.data['tasks']]
+        assert titles_desc == ['Deploy release']
+
+    def test_search_tasks_sql_injection_sanitized(self, auth_client, user):
+        p1 = Project.objects.create(name='P1', owner=user)
+        Membership.objects.create(user=user, project=p1, role='admin')
+        Task.objects.create(project=p1, title='Confidential P1 Task', created_by=user)
+
+        other = User.objects.create_user(email='other@example.com', name='Other', password='password123')
+        p2 = Project.objects.create(name='P2', owner=other)
+        Membership.objects.create(user=other, project=p2, role='admin')
+        Task.objects.create(project=p2, title='Secret P2 Task', created_by=other)
+
+        sqli_payload = "') OR 1=1 --"
+        response = auth_client.get(f'/api/projects/{p1.id}/tasks?q={sqli_payload}')
+        assert response.status_code == 200
+        titles = [t['title'] for t in response.data['tasks']]
+        assert 'Secret P2 Task' not in titles
+        assert len(titles) == 0
+
+        union_payload = "') UNION SELECT id, NULL, email, password, 'todo', NULL, NULL, 0, now(), now() FROM users --"
+        response_union = auth_client.get(f'/api/projects/{p1.id}/tasks?q={union_payload}')
+        assert response_union.status_code == 200
+        assert len(response_union.data['tasks']) == 0
+
